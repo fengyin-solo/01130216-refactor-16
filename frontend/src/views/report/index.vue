@@ -6,16 +6,11 @@
           <span>报表中心</span>
           <div>
             <el-select v-model="reportType" placeholder="选择报表类型" style="width: 200px; margin-right: 10px;">
-              <el-option label="生产日报" value="daily" />
-              <el-option label="生产周报" value="weekly" />
-              <el-option label="生产月报" value="monthly" />
-              <el-option label="钻井进度报表" value="drilling" />
-              <el-option label="设备运行报表" value="equipment" />
-              <el-option label="HSE报表" value="hse" />
+              <el-option v-for="item in reportTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
             </el-select>
-            <el-date-picker v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 300px; margin-right: 10px;" />
-            <el-button type="primary">查询</el-button>
-            <el-button>导出Excel</el-button>
+            <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 300px; margin-right: 10px;" />
+            <el-button type="primary" :loading="loading" @click="handleQuery">查询</el-button>
+            <el-button :loading="exporting" @click="handleExport">导出Excel</el-button>
           </div>
         </div>
       </template>
@@ -24,33 +19,33 @@
         <el-col :span="8">
           <div class="summary-card">
             <div class="summary-label">总产油量</div>
-            <div class="summary-value">12,586</div>
+            <div class="summary-value">{{ summaryOil }}</div>
             <div class="summary-unit">吨</div>
             <div class="summary-trend up">
               <el-icon><TrendCharts /></el-icon>
-              <span>较上期 +8.5%</span>
+              <span>较上期 {{ oilDeltaText }}</span>
             </div>
           </div>
         </el-col>
         <el-col :span="8">
           <div class="summary-card">
             <div class="summary-label">总产水量</div>
-            <div class="summary-value">35,241</div>
+            <div class="summary-value">{{ summaryWater }}</div>
             <div class="summary-unit">吨</div>
             <div class="summary-trend down">
               <el-icon><TrendCharts /></el-icon>
-              <span>较上期 -3.2%</span>
+              <span>较上期 {{ waterDeltaText }}</span>
             </div>
           </div>
         </el-col>
         <el-col :span="8">
           <div class="summary-card">
             <div class="summary-label">平均含水率</div>
-            <div class="summary-value">73.68</div>
+            <div class="summary-value">{{ summaryWaterCut }}</div>
             <div class="summary-unit">%</div>
             <div class="summary-trend up">
               <el-icon><TrendCharts /></el-icon>
-              <span>较上期 +1.2%</span>
+              <span>较上期 {{ waterCutDeltaText }}</span>
             </div>
           </div>
         </el-col>
@@ -76,20 +71,31 @@
         <el-table :data="reportData" border stripe style="width: 100%">
           <el-table-column prop="date" label="日期" width="120" />
           <el-table-column prop="wellName" label="井名" width="100" />
-          <el-table-column prop="oilProduction" label="产油量(t)" width="120" />
-          <el-table-column prop="waterProduction" label="产水量(t)" width="120" />
-          <el-table-column prop="gasProduction" label="产气量(m³)" width="120" />
+          <el-table-column prop="oilProduction" label="产油量(t)" width="120">
+            <template #default="{ row }">{{ cellText(row, 'oilProduction') }}</template>
+          </el-table-column>
+          <el-table-column prop="waterProduction" label="产水量(t)" width="120">
+            <template #default="{ row }">{{ cellText(row, 'waterProduction') }}</template>
+          </el-table-column>
+          <el-table-column prop="gasProduction" label="产气量(m³)" width="120">
+            <template #default="{ row }">{{ cellText(row, 'gasProduction') }}</template>
+          </el-table-column>
           <el-table-column prop="waterCut" label="含水率(%)" width="120">
             <template #default="{ row }">
-              <el-progress :percentage="row.waterCut" :stroke-width="10" />
+              <el-progress :percentage="row.waterCut ?? 0" :stroke-width="10" />
             </template>
           </el-table-column>
-          <el-table-column prop="workingHours" label="生产时长(h)" width="120" />
+          <el-table-column prop="workingHours" label="生产时长(h)" width="120">
+            <template #default="{ row }">{{ cellText(row, 'workingHours') }}</template>
+          </el-table-column>
           <el-table-column prop="status" label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="row.status === '正常' ? 'success' : 'warning'" size="small">{{ row.status }}</el-tag>
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty description="当前区间暂无数据" :image-size="80" />
+          </template>
         </el-table>
       </div>
     </el-card>
@@ -97,46 +103,103 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
+import {
+  REPORT_TYPE_OPTIONS,
+  resolveScope,
+  buildReport,
+  exportReport,
+  ExportError,
+  formatNumber,
+  formatDelta,
+  formatTrendValue,
+  formatMetric,
+  EMPTY_TEXT
+} from './report'
+import type { ReportResult, ReportType, MetricKey, RawRecord } from './report'
 
-const reportType = ref('daily')
-const dateRange = ref('')
+const reportType = ref<ReportType>('daily')
+const dateRange = ref<[string, string] | null>(null)
 const trendChart = ref<HTMLElement>()
 const pieChart = ref<HTMLElement>()
 
-const reportData = ref([
-  { date: '2024-01-15', wellName: 'A-01井', oilProduction: 125.6, waterProduction: 352.1, gasProduction: 850, waterCut: 73.7, workingHours: 24, status: '正常' },
-  { date: '2024-01-15', wellName: 'B-03井', oilProduction: 98.3, waterProduction: 285.6, gasProduction: 720, waterCut: 74.4, workingHours: 24, status: '正常' },
-  { date: '2024-01-15', wellName: 'C-02井', oilProduction: 156.2, waterProduction: 412.3, gasProduction: 980, waterCut: 72.5, workingHours: 22, status: '正常' },
-  { date: '2024-01-15', wellName: 'D-05井', oilProduction: 85.4, waterProduction: 268.9, gasProduction: 650, waterCut: 75.9, workingHours: 24, status: '异常' },
-  { date: '2024-01-15', wellName: 'E-01井', oilProduction: 112.8, waterProduction: 325.4, gasProduction: 790, waterCut: 74.2, workingHours: 24, status: '正常' }
-])
+const reportTypeOptions = REPORT_TYPE_OPTIONS
+const loading = ref(false)
+const exporting = ref(false)
+const reportResult = ref<ReportResult | null>(null)
 
-const initTrendChart = () => {
+const reportData = computed<RawRecord[]>(() => reportResult.value?.records ?? [])
+
+const summaryOil = computed(() =>
+  formatNumber(reportResult.value?.summary.totalOil ?? null, 0)
+)
+const summaryWater = computed(() =>
+  formatNumber(reportResult.value?.summary.totalWater ?? null, 0)
+)
+const summaryWaterCut = computed(() =>
+  formatNumber(reportResult.value?.summary.avgWaterCut ?? null, 2)
+)
+const oilDeltaText = computed(() =>
+  formatDelta(reportResult.value?.summary.oilDelta ?? null)
+)
+const waterDeltaText = computed(() =>
+  formatDelta(reportResult.value?.summary.waterDelta ?? null)
+)
+const waterCutDeltaText = computed(() =>
+  formatDelta(reportResult.value?.summary.waterCutDelta ?? null)
+)
+
+/** 明细单元格：与导出共用 formatMetric，空值统一显示 -- */
+const cellText = (row: RawRecord, key: MetricKey) => formatMetric(row, key)
+
+let trendInstance: echarts.ECharts | null = null
+let pieInstance: echarts.ECharts | null = null
+
+const renderTrendChart = () => {
   if (!trendChart.value) return
-  const chart = echarts.init(trendChart.value)
-  const dates = ['1/10', '1/11', '1/12', '1/13', '1/14', '1/15', '1/16', '1/17', '1/18', '1/19', '1/20']
-  chart.setOption({
+  if (!trendInstance) trendInstance = echarts.init(trendChart.value)
+  const trend = reportResult.value?.trend ?? []
+  trendInstance.setOption({
     tooltip: { trigger: 'axis' },
     legend: { data: ['产油量', '产水量'] },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
-    xAxis: { type: 'category', boundaryGap: false, data: dates },
+    xAxis: { type: 'category', boundaryGap: false, data: trend.map((p) => p.label) },
     yAxis: { type: 'value' },
     series: [
-      { name: '产油量', type: 'line', smooth: true, stack: 'Total', areaStyle: { color: 'rgba(59,130,246,0.1)' }, data: [520, 535, 560, 545, 578, 578.3, 580, 592, 605, 610, 625], itemStyle: { color: '#3b82f6' } },
-      { name: '产水量', type: 'line', smooth: true, stack: 'Total', areaStyle: { color: 'rgba(34,197,94,0.1)' }, data: [1640, 1680, 1650, 1700, 1720, 1644.3, 1680, 1710, 1730, 1750, 1780], itemStyle: { color: '#22c55e' } }
+      {
+        name: '产油量',
+        type: 'line',
+        smooth: true,
+        stack: 'Total',
+        areaStyle: { color: 'rgba(59,130,246,0.1)' },
+        data: trend.map((p) => formatTrendValue(p.oil)),
+        itemStyle: { color: '#3b82f6' }
+      },
+      {
+        name: '产水量',
+        type: 'line',
+        smooth: true,
+        stack: 'Total',
+        areaStyle: { color: 'rgba(34,197,94,0.1)' },
+        data: trend.map((p) => formatTrendValue(p.water)),
+        itemStyle: { color: '#22c55e' }
+      }
     ]
-  })
-  window.addEventListener('resize', () => chart.resize())
+  }, true)
 }
 
-const initPieChart = () => {
+const renderPieChart = () => {
   if (!pieChart.value) return
-  const chart = echarts.init(pieChart.value)
-  chart.setOption({
+  if (!pieInstance) pieInstance = echarts.init(pieChart.value)
+  const blocks = reportResult.value?.blocks ?? []
+  pieInstance.setOption({
     tooltip: { trigger: 'item' },
     legend: { orient: 'vertical', left: 'left' },
+    graphic: blocks.length
+      ? undefined
+      : { type: 'text', left: 'center', top: 'middle', style: { text: EMPTY_TEXT, fill: '#94a3b8', fontSize: 14 } },
     series: [{
       name: '区块产量',
       type: 'pie',
@@ -145,21 +208,64 @@ const initPieChart = () => {
       itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
       label: { show: true, formatter: '{b}: {c}t\n({d}%)' },
       emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } },
-      data: [
-        { value: 2586, name: 'A区块', itemStyle: { color: '#3b82f6' } },
-        { value: 3245, name: 'B区块', itemStyle: { color: '#22c55e' } },
-        { value: 4123, name: 'C区块', itemStyle: { color: '#f59e0b' } },
-        { value: 1856, name: 'D区块', itemStyle: { color: '#8b5cf6' } },
-        { value: 776, name: 'E区块', itemStyle: { color: '#ef4444' } }
-      ]
+      data: blocks
     }]
-  })
-  window.addEventListener('resize', () => chart.resize())
+  }, true)
 }
 
-onMounted(() => {
-  initTrendChart()
-  initPieChart()
+const renderCharts = () => {
+  nextTick(() => {
+    renderTrendChart()
+    renderPieChart()
+  })
+}
+
+const handleResize = () => {
+  trendInstance?.resize()
+  pieInstance?.resize()
+}
+
+/** 查询：时间口径（含区间接反归一）只走 resolveScope 一处 */
+const handleQuery = async () => {
+  const scope = resolveScope(reportType.value, dateRange.value)
+  if (scope.reversed) {
+    ElMessage.warning('开始日期晚于结束日期，已自动按升序查询')
+  }
+  loading.value = true
+  try {
+    reportResult.value = await buildReport(scope)
+    renderCharts()
+    if (reportResult.value.empty) {
+      ElMessage.info('当前区间暂无数据')
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 导出：直接消费查询得到的同一份结果，失败给出明确提示 */
+const handleExport = async () => {
+  if (!reportResult.value) return
+  exporting.value = true
+  try {
+    await exportReport(reportResult.value)
+  } catch (error) {
+    const message = error instanceof ExportError ? error.message : '导出失败，请重试'
+    ElMessage.error(message)
+  } finally {
+    exporting.value = false
+  }}
+
+onMounted(async () => {
+  window.addEventListener('resize', handleResize)
+  // 默认加载生产日报口径，首屏数值与原静态报表一致
+  await handleQuery()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  trendInstance?.dispose()
+  pieInstance?.dispose()
 })
 </script>
 
@@ -180,37 +286,37 @@ onMounted(() => {
   border-radius: 8px;
   padding: 25px;
   text-align: center;
-  
+
   .summary-label {
     font-size: 14px;
     color: #64748b;
     margin-bottom: 10px;
   }
-  
+
   .summary-value {
     font-size: 36px;
     font-weight: 700;
     color: #1e293b;
     line-height: 1;
   }
-  
+
   .summary-unit {
     font-size: 14px;
     color: #64748b;
     margin-bottom: 10px;
   }
-  
+
   .summary-trend {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 5px;
     font-size: 13px;
-    
+
     &.up {
       color: #22c55e;
     }
-    
+
     &.down {
       color: #ef4444;
     }
@@ -221,7 +327,7 @@ onMounted(() => {
   background: #fff;
   border-radius: 8px;
   padding: 20px;
-  
+
   h4 {
     margin: 0 0 15px 0;
     font-size: 16px;
