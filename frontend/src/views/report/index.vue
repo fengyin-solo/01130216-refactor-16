@@ -13,44 +13,30 @@
               <el-option label="设备运行报表" value="equipment" />
               <el-option label="HSE报表" value="hse" />
             </el-select>
-            <el-date-picker v-model="dateRange" type="daterange" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 300px; margin-right: 10px;" />
-            <el-button type="primary">查询</el-button>
-            <el-button>导出Excel</el-button>
+            <el-date-picker
+              v-model="dateRange"
+              type="daterange"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              value-format="YYYY-MM-DD"
+              style="width: 300px; margin-right: 10px;"
+            />
+            <el-button type="primary" @click="handleQuery">查询</el-button>
+            <el-button :loading="exporting" :disabled="!result || result.empty" @click="handleExport">导出Excel</el-button>
           </div>
         </div>
       </template>
 
       <el-row :gutter="20" class="mb-20">
-        <el-col :span="8">
+        <el-col v-for="(card, idx) in summaryCards" :key="idx" :span="8">
           <div class="summary-card">
-            <div class="summary-label">总产油量</div>
-            <div class="summary-value">12,586</div>
-            <div class="summary-unit">吨</div>
-            <div class="summary-trend up">
+            <div class="summary-label">{{ card.label }}</div>
+            <div class="summary-value">{{ card.value }}</div>
+            <div class="summary-unit">{{ card.unit }}</div>
+            <div class="summary-trend" :class="trendClass(card.trendUp)">
               <el-icon><TrendCharts /></el-icon>
-              <span>较上期 +8.5%</span>
-            </div>
-          </div>
-        </el-col>
-        <el-col :span="8">
-          <div class="summary-card">
-            <div class="summary-label">总产水量</div>
-            <div class="summary-value">35,241</div>
-            <div class="summary-unit">吨</div>
-            <div class="summary-trend down">
-              <el-icon><TrendCharts /></el-icon>
-              <span>较上期 -3.2%</span>
-            </div>
-          </div>
-        </el-col>
-        <el-col :span="8">
-          <div class="summary-card">
-            <div class="summary-label">平均含水率</div>
-            <div class="summary-value">73.68</div>
-            <div class="summary-unit">%</div>
-            <div class="summary-trend up">
-              <el-icon><TrendCharts /></el-icon>
-              <span>较上期 +1.2%</span>
+              <span>{{ card.trendText }}</span>
             </div>
           </div>
         </el-col>
@@ -59,37 +45,48 @@
       <el-row :gutter="20" class="mb-20">
         <el-col :span="16">
           <div class="chart-box">
-            <h4>产量趋势分析</h4>
-            <div ref="trendChart" class="chart-large"></div>
+            <h4>{{ trendTitle }}</h4>
+            <div v-show="hasData" ref="trendChart" class="chart-large"></div>
+            <el-empty v-if="!hasData" description="当前区间暂无数据" :image-size="80" class="chart-empty" />
           </div>
         </el-col>
         <el-col :span="8">
           <div class="chart-box">
-            <h4>区块产量占比</h4>
-            <div ref="pieChart" class="chart-medium"></div>
+            <h4>{{ pieTitle }}</h4>
+            <div v-show="hasData" ref="pieChart" class="chart-medium"></div>
+            <el-empty v-if="!hasData" description="当前区间暂无数据" :image-size="80" class="chart-empty" />
           </div>
         </el-col>
       </el-row>
 
       <div class="table-box">
         <h4>详细数据</h4>
-        <el-table :data="reportData" border stripe style="width: 100%">
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column prop="wellName" label="井名" width="100" />
-          <el-table-column prop="oilProduction" label="产油量(t)" width="120" />
-          <el-table-column prop="waterProduction" label="产水量(t)" width="120" />
-          <el-table-column prop="gasProduction" label="产气量(m³)" width="120" />
-          <el-table-column prop="waterCut" label="含水率(%)" width="120">
+        <el-table :data="tableRows" border stripe style="width: 100%">
+          <el-table-column prop="dateLabel" :label="dateColumnLabel" width="130" />
+          <el-table-column prop="name" :label="nameColumnLabel" width="120" />
+          <el-table-column
+            v-for="col in tableColumns"
+            :key="col.key"
+            :label="col.label"
+            :width="col.key === 'waterCut' ? 140 : 130"
+          >
             <template #default="{ row }">
-              <el-progress :percentage="row.waterCut" :stroke-width="10" />
+              <el-progress
+                v-if="col.key === 'waterCut' && typeof row.values[col.key] === 'number'"
+                :percentage="row.values[col.key]"
+                :stroke-width="10"
+              />
+              <span v-else>{{ cellText(row, col.key) }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="workingHours" label="生产时长(h)" width="120" />
-          <el-table-column prop="status" label="状态" width="100">
+          <el-table-column v-if="showStatus" label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="row.status === '正常' ? 'success' : 'warning'" size="small">{{ row.status }}</el-tag>
             </template>
           </el-table-column>
+          <template #empty>
+            <el-empty description="当前区间暂无明细数据，请调整报表类型或日期区间" :image-size="80" />
+          </template>
         </el-table>
       </div>
     </el-card>
@@ -97,69 +94,188 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
+import {
+  REPORT_CONFIGS,
+  buildReport,
+  exportReportCsv,
+  formatCell,
+  type ReportType,
+  type ReportResult,
+  type SummaryCard
+} from './reportCore'
 
-const reportType = ref('daily')
-const dateRange = ref('')
+const PIE_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4']
+
+const reportType = ref<ReportType>('daily')
+const dateRange = ref<[string, string] | null>(['2024-01-01', '2024-01-31'])
+const result = ref<ReportResult | null>(null)
+
 const trendChart = ref<HTMLElement>()
 const pieChart = ref<HTMLElement>()
+let trendInstance: echarts.ECharts | null = null
+let pieInstance: echarts.ECharts | null = null
+const exporting = ref(false)
 
-const reportData = ref([
-  { date: '2024-01-15', wellName: 'A-01井', oilProduction: 125.6, waterProduction: 352.1, gasProduction: 850, waterCut: 73.7, workingHours: 24, status: '正常' },
-  { date: '2024-01-15', wellName: 'B-03井', oilProduction: 98.3, waterProduction: 285.6, gasProduction: 720, waterCut: 74.4, workingHours: 24, status: '正常' },
-  { date: '2024-01-15', wellName: 'C-02井', oilProduction: 156.2, waterProduction: 412.3, gasProduction: 980, waterCut: 72.5, workingHours: 22, status: '正常' },
-  { date: '2024-01-15', wellName: 'D-05井', oilProduction: 85.4, waterProduction: 268.9, gasProduction: 650, waterCut: 75.9, workingHours: 24, status: '异常' },
-  { date: '2024-01-15', wellName: 'E-01井', oilProduction: 112.8, waterProduction: 325.4, gasProduction: 790, waterCut: 74.2, workingHours: 24, status: '正常' }
-])
+const summaryCards = computed<SummaryCard[]>(() => result.value?.cards ?? [])
+const tableRows = computed(() => result.value?.table ?? [])
+const tableColumns = computed(() => result.value?.columns ?? [])
+const showStatus = computed(() => result.value?.config.hasStatus ?? false)
+const dateColumnLabel = computed(() => result.value?.config.dateLabel ?? '日期')
+const nameColumnLabel = computed(() => result.value?.config.nameLabel ?? '名称')
+const trendTitle = computed(() => result.value?.config.trendTitle ?? '趋势分析')
+const pieTitle = computed(() => result.value?.config.pieTitle ?? '分组占比')
+const hasData = computed(() => !!result.value && !result.value.empty)
 
-const initTrendChart = () => {
-  if (!trendChart.value) return
-  const chart = echarts.init(trendChart.value)
-  const dates = ['1/10', '1/11', '1/12', '1/13', '1/14', '1/15', '1/16', '1/17', '1/18', '1/19', '1/20']
-  chart.setOption({
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['产油量', '产水量'] },
-    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
-    xAxis: { type: 'category', boundaryGap: false, data: dates },
-    yAxis: { type: 'value' },
-    series: [
-      { name: '产油量', type: 'line', smooth: true, stack: 'Total', areaStyle: { color: 'rgba(59,130,246,0.1)' }, data: [520, 535, 560, 545, 578, 578.3, 580, 592, 605, 610, 625], itemStyle: { color: '#3b82f6' } },
-      { name: '产水量', type: 'line', smooth: true, stack: 'Total', areaStyle: { color: 'rgba(34,197,94,0.1)' }, data: [1640, 1680, 1650, 1700, 1720, 1644.3, 1680, 1710, 1730, 1750, 1780], itemStyle: { color: '#22c55e' } }
-    ]
-  })
-  window.addEventListener('resize', () => chart.resize())
+function trendClass(up: boolean | null): string {
+  if (up === null) return 'flat'
+  return up ? 'up' : 'down'
 }
 
-const initPieChart = () => {
-  if (!pieChart.value) return
-  const chart = echarts.init(pieChart.value)
-  chart.setOption({
+function cellText(row: { values: Record<string, number | null> }, key: string): string {
+  const metric = result.value?.config.metrics.find((m) => m.key === key)
+  const value = row.values[key]
+  if (!metric || value === null || value === undefined) return '—'
+  return formatCell(value, metric)
+}
+
+/** 汇总 / 区块 / 明细 / 导出共用同一份 buildReport 结果，视图层不再自行计算任何指标 */
+function refresh() {
+  if (!result.value) return
+  renderTrend()
+  renderPie()
+}
+
+function renderTrend() {
+  if (!trendInstance || !result.value) return
+  if (!hasData.value) {
+    trendInstance.clear()
+    return
+  }
+  const { trend, config } = result.value
+  trendInstance.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: [...config.trendSeriesNames] },
+    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', boundaryGap: false, data: trend.labels },
+    yAxis: { type: 'value' },
+    series: [
+      {
+        name: config.trendSeriesNames[0],
+        type: 'line',
+        smooth: true,
+        ...(config.stackTrend ? { stack: 'Total', areaStyle: { color: 'rgba(59,130,246,0.1)' } } : {}),
+        data: trend.series[0].data,
+        itemStyle: { color: '#3b82f6' },
+        connectNulls: false
+      },
+      {
+        name: config.trendSeriesNames[1],
+        type: 'line',
+        smooth: true,
+        ...(config.stackTrend ? { stack: 'Total', areaStyle: { color: 'rgba(34,197,94,0.1)' } } : {}),
+        data: trend.series[1].data,
+        itemStyle: { color: '#22c55e' },
+        connectNulls: false
+      }
+    ]
+  }, true)
+}
+
+function renderPie() {
+  if (!pieInstance || !result.value) return
+  if (!hasData.value) {
+    pieInstance.clear()
+    return
+  }
+  const { pie, config } = result.value
+  pieInstance.setOption({
     tooltip: { trigger: 'item' },
     legend: { orient: 'vertical', left: 'left' },
     series: [{
-      name: '区块产量',
+      name: config.pieName,
       type: 'pie',
       radius: ['40%', '70%'],
       avoidLabelOverlap: false,
       itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-      label: { show: true, formatter: '{b}: {c}t\n({d}%)' },
+      label: { show: true, formatter: `{b}: {c}${config.pieUnit}\n({d}%)` },
       emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } },
-      data: [
-        { value: 2586, name: 'A区块', itemStyle: { color: '#3b82f6' } },
-        { value: 3245, name: 'B区块', itemStyle: { color: '#22c55e' } },
-        { value: 4123, name: 'C区块', itemStyle: { color: '#f59e0b' } },
-        { value: 1856, name: 'D区块', itemStyle: { color: '#8b5cf6' } },
-        { value: 776, name: 'E区块', itemStyle: { color: '#ef4444' } }
-      ]
+      data: pie.map((slice, i) => ({
+        value: slice.value,
+        name: slice.name,
+        itemStyle: { color: PIE_COLORS[i % PIE_COLORS.length] }
+      }))
     }]
-  })
-  window.addEventListener('resize', () => chart.resize())
+  }, true)
+}
+
+function handleQuery() {
+  if (!dateRange.value || !dateRange.value[0] || !dateRange.value[1]) {
+    ElMessage.warning('请先选择查询日期区间')
+    return
+  }
+  const built = buildReport(reportType.value, dateRange.value)
+  if (!built.result || !built.range) {
+    ElMessage.warning('请先选择查询日期区间')
+    return
+  }
+  // 区间接反：口径层静默对调，视图层只负责提示一次
+  if (built.range.swapped) {
+    ElMessage.warning('开始日期晚于结束日期，已自动按时间先后对调查询')
+  }
+  result.value = built.result
+  refresh()
+  if (built.result.empty) {
+    ElMessage.info(`${REPORT_CONFIGS[reportType.value].label}在所选区间内暂无数据`)
+  }
+}
+
+function handleExport() {
+  if (!result.value || result.value.empty) {
+    ElMessage.error('导出失败：当前区间没有可导出的数据')
+    return
+  }
+  exporting.value = true
+  try {
+    const { filename, content } = exportReportCsv(result.value)
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    ElMessage.success('导出成功')
+  } catch (e) {
+    ElMessage.error(`导出失败：${e instanceof Error ? e.message : '请稍后重试'}`)
+  } finally {
+    exporting.value = false
+  }
+}
+
+const handleResize = () => {
+  trendInstance?.resize()
+  pieInstance?.resize()
 }
 
 onMounted(() => {
-  initTrendChart()
-  initPieChart()
+  if (trendChart.value) trendInstance = echarts.init(trendChart.value)
+  if (pieChart.value) pieInstance = echarts.init(pieChart.value)
+  window.addEventListener('resize', handleResize)
+  // 首屏口径与默认区间下的统一结果
+  const built = buildReport(reportType.value, dateRange.value)
+  result.value = built.result
+  refresh()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  trendInstance?.dispose()
+  pieInstance?.dispose()
 })
 </script>
 
@@ -180,39 +296,43 @@ onMounted(() => {
   border-radius: 8px;
   padding: 25px;
   text-align: center;
-  
+
   .summary-label {
     font-size: 14px;
     color: #64748b;
     margin-bottom: 10px;
   }
-  
+
   .summary-value {
     font-size: 36px;
     font-weight: 700;
     color: #1e293b;
     line-height: 1;
   }
-  
+
   .summary-unit {
     font-size: 14px;
     color: #64748b;
     margin-bottom: 10px;
   }
-  
+
   .summary-trend {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 5px;
     font-size: 13px;
-    
+
     &.up {
       color: #22c55e;
     }
-    
+
     &.down {
       color: #ef4444;
+    }
+
+    &.flat {
+      color: #94a3b8;
     }
   }
 }
@@ -221,7 +341,7 @@ onMounted(() => {
   background: #fff;
   border-radius: 8px;
   padding: 20px;
-  
+
   h4 {
     margin: 0 0 15px 0;
     font-size: 16px;
@@ -237,6 +357,13 @@ onMounted(() => {
 .chart-medium {
   width: 100%;
   height: 280px;
+}
+
+.chart-empty {
+  height: 280px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .mb-20 {
